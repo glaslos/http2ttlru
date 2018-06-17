@@ -1,50 +1,49 @@
 package main
 
 import (
-	"fmt"
-	"html"
-	"log"
+	"encoding/json"
 	"net/http"
-	"strconv"
 	"time"
 
-	"github.com/zvelo/ttlru"
 	"golang.org/x/net/http2"
+	"zvelo.io/ttlru"
 )
 
-var l = ttlru.New(128, 20*time.Second)
+var cache ttlru.Cache
+var srv http.Server
 
-func index(w http.ResponseWriter, r *http.Request) {
-	log.Println(r.URL.Path)
-	fmt.Fprintf(w, "Hi %q\n", html.EscapeString(r.URL.Path))
+type resp struct {
+	success bool
+	value   interface{}
 }
 
 func api(w http.ResponseWriter, r *http.Request) {
-	ret := false
+	ok := false
+	ret := *new(interface{})
 	key := r.URL.Query().Get("key")
 	value := r.URL.Query().Get("value")
 	if r.Method == "PUT" {
-		l = ttlru.New(128, 2*time.Second)
+		cache = ttlru.New(128, ttlru.WithTTL(20*time.Second))
 	} else if r.Method == "POST" {
-		ret = l.Set(key, value)
+		ok = cache.Set(key, value)
 	} else if r.Method == "GET" {
-		inter, _ := l.Get(key)
-		if value, ret = inter.(string); ret {
-			/* act on str */
-		} else {
-			/* not string */
-		}
+		ret, ok = cache.Get(key)
 	}
-	fmt.Fprintf(w, "%q, %q", value, strconv.FormatBool(ret))
+	if err := json.NewEncoder(w).Encode(resp{success: ok, value: ret}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func main() {
-	var srv http.Server
-	http.HandleFunc("/", index)
+	cache = ttlru.New(128, ttlru.WithTTL(20*time.Second))
 	http.HandleFunc("/api", api)
-	http2.ConfigureServer(&srv, &http2.Server{})
+	if err := http2.ConfigureServer(&srv, &http2.Server{}); err != nil {
+		panic(err)
+	}
 	// openssl genrsa -out server.key 2048
 	// openssl req -new -x509 -key server.key -out server.pem -days 3650
 	// testing: h2load -n10000 -c100 -m10 "https://localhost/api?key=foo"
-	log.Fatal(srv.ListenAndServeTLS("server.pem", "server.key"))
+	if err := srv.ListenAndServeTLS("server.pem", "server.key"); err != nil {
+		panic(err)
+	}
 }
